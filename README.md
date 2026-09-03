@@ -19,7 +19,7 @@ Toshihiro Tsuchihashi, Toshiji Kawagoe, and Tomohisa Okada
 - `data/`  
   Contains the experimental data used in the analysis.
 
-- `instructions/`  
+- `instructions.pdf`  
   Contains the experimental instructions shown to participants.
 
 ---
