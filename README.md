@@ -19,9 +19,6 @@ Toshihiro Tsuchihashi, Toshiji Kawagoe, and Tomohisa Okada
 - `data/`  
   Contains the experimental data used in the analysis.
 
-- `program/`  
-  Contains the experimental program and related materials.
-
 - `instructions/`  
   Contains the experimental instructions shown to participants.
 
