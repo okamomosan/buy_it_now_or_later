@@ -1,0 +1,1941 @@
+---
+title: "Replication Analysis: Buy It Now Or Later?"
+author: "Toshiji Kawagoe, Tomohisa Okada, and Toshihiro Tsuchihashi"
+date: "`r format(Sys.time(), '%Y/%m/%d')`"
+output: 
+  html_document:
+    highlight: pygments
+    theme: cerulean
+    df_print: paged
+    toc: true
+    toc_depth: 5
+    toc_float: 
+      collapsed: true
+      smooth_scroll: true
+    number_sections: true
+    code_folding: hide
+---
+
+```{r setup, include=FALSE}
+
+knitr::opts_chunk$set(
+  warning = FALSE,
+  message = FALSE
+)
+
+rm(list = ls())
+
+```
+
+<br>
+
+# Data Preparation {-}
+
+This section imports and cleans the experimental and post-experimental questionnaire data used in the analysis.
+
+<br>
+
+### Packages {-}
+
+```{r packages}
+
+library(tidyverse)
+library(stringi)
+library(DT)
+library(patchwork)
+library(texreg)
+library(htmltools)
+library(bbmle)
+library(fixest)
+
+```
+
+### Experimental Data {-}
+
+The raw experimental data are stored in `data/raw/`.
+
+```{r import-experimental-data}
+
+raw_files <- list.files(
+  path = "data/raw",
+  pattern = "\\.csv$",
+  full.names = TRUE
+)
+
+original_data <- raw_files %>%
+
+  lapply(function(file) {
+
+    read_csv(
+      file,
+      col_types = cols(.default = col_character()),
+      show_col_types = FALSE
+    ) %>%
+
+      select(
+        -ends_with("pay_amount2"),
+        -ends_with("delta_value"),
+        -ends_with("session.config.fix_rounds")
+      ) %>%
+
+      rename_with(
+        ~ gsub(
+          "kto_old1",
+          "kto",
+          .x
+        )
+      )
+
+  }) %>%
+
+  bind_rows() %>%
+
+  type_convert(
+    na = c("", "NA")
+  ) %>%
+
+  # ID variables are always treated as character variables
+  mutate(
+    participant.label = as.character(participant.label),
+    participant.code = as.character(participant.code),
+    session.code = as.character(session.code)
+  )
+
+```
+
+### Questionnaire Data {-}
+
+The post-experimental questionnaire data are stored in `data/questionnaire/`.
+
+```{r import-questionnaire-data}
+
+questionnaire_files <- list.files(
+  path = "data/questionnaire",
+  pattern = "\\.csv$",
+  full.names = TRUE
+)
+
+q_data <- questionnaire_files %>%
+
+  lapply(function(file) {
+
+    read_csv(
+      file,
+      col_types = cols(.default = col_character()),
+      show_col_types = FALSE
+    )
+
+  }) %>%
+
+  bind_rows() %>%
+
+  filter(
+    !is.na(participant.label)
+  ) %>%
+
+  mutate(
+    across(
+      c(
+        q15,
+        q16,
+        q17,
+        q18,
+        q19,
+        q20,
+        q21,
+        q23,
+        q24,
+        q25
+      ),
+      ~ stri_trans_general(
+        .x,
+        "Fullwidth-Halfwidth"
+      )
+    )
+  ) %>%
+
+  mutate(
+    across(
+      c(
+        q15,
+        q16,
+        q17,
+        q18,
+        q19,
+        q20,
+        q21,
+        q23,
+        q24,
+        q25
+      ),
+      parse_number
+    )
+  ) %>%
+
+  # Join keys are always treated as character variables
+  mutate(
+    participant.label = as.character(participant.label),
+    session.code = as.character(session.code)
+  )
+
+```
+
+### Construction of Questionnaire Variables {-}
+
+The questionnaire is used to construct measures of cognitive reflection, risk preference, and time preference.
+
+```{r construct-questionnaire-variables}
+
+q_data <- q_data %>%
+
+  mutate(
+
+    # Cognitive Reflection Test
+    crt1 = ifelse(q15 == 25, 1, 0),
+    crt2 = ifelse(q16 == 30, 1, 0),
+    crt3 = ifelse(q17 == 47, 1, 0),
+    crt4 = ifelse(q18 == 5, 1, 0),
+    crt5 = ifelse(q19 == 2000, 1, 0),
+    crt6 = ifelse(q20 == 5, 1, 0),
+    crt7 = ifelse(q21 == 20, 1, 0),
+    crt8 = ifelse(q22 == "損失を出している", 1, 0),
+    crt9 = ifelse(q23 == 50, 1, 0),
+    crt10 = ifelse(q24 == 4, 1, 0),
+    crt11 = ifelse(q25 == 29, 1, 0),
+
+    # Time preference
+    q14 = ifelse(
+      q14 == "1か月後に3000円を受け取る",
+      3825,
+      parse_number(q14)
+    ),
+
+    time_pref =
+      1 / (
+        1 +
+          ((q14 - 3000) / 3000)
+      )
+
+  ) %>%
+
+  mutate(
+
+    # Risk preference
+    risk_av = case_when(
+
+      q13 == "くじ１：賞金A＝2800円、賞金B＝2800円" ~ 3.46,
+
+      q13 == "くじ２：賞金A＝2400円、賞金B＝3600円" ~ 2.31,
+
+      q13 == "くじ３：賞金A＝2000円、賞金B＝4400円" ~ 0.935,
+
+      q13 == "くじ４：賞金A＝1600円、賞金B＝5200円" ~ 0.605,
+
+      q13 == "くじ５：賞金A＝1200円、賞金B＝6000円" ~ 0.25,
+
+      q13 == "くじ６：賞金A＝200円、賞金B＝7000円" ~ 0
+
+    )
+
+  ) %>%
+
+  mutate(
+
+    crt_mean = rowMeans(
+      select(
+        .,
+        starts_with("crt")
+      ),
+      na.rm = TRUE
+    )
+
+  ) %>%
+
+  select(
+    session.code,
+    participant.label,
+    risk_av,
+    time_pref,
+    crt_mean,
+    crt1,
+    crt2,
+    crt3,
+    crt4,
+    crt5,
+    crt6,
+    crt7,
+    crt8,
+    crt9,
+    crt10,
+    crt11
+  )
+
+```
+
+### Merge Experimental and Questionnaire Data {-}
+
+Experimental and questionnaire data are matched using session code and participant label.
+
+```{r merge-data}
+
+# Ensure join keys have identical types
+original_data <- original_data %>%
+
+  mutate(
+    session.code = as.character(session.code),
+    participant.label = as.character(participant.label)
+  )
+
+q_data <- q_data %>%
+
+  mutate(
+    session.code = as.character(session.code),
+    participant.label = as.character(participant.label)
+  )
+
+
+# Check that questionnaire observations are unique
+q_duplicates <- q_data %>%
+
+  count(
+    session.code,
+    participant.label
+  ) %>%
+
+  filter(
+    n > 1
+  )
+
+if (nrow(q_duplicates) > 0) {
+
+  print(q_duplicates)
+
+  stop(
+    "Duplicate session.code × participant.label observations found in questionnaire data."
+  )
+
+}
+
+
+# Merge questionnaire variables into experimental data
+unified_data <- left_join(
+  original_data,
+  q_data,
+  by = c(
+    "session.code",
+    "participant.label"
+  )
+)
+
+```
+
+### Construction of Analysis Data {-}
+
+The oTree data are transformed from wide format into a participant-round level dataset.
+
+```{r construct-analysis-data}
+
+tidy_data <- unified_data %>%
+
+  # Remove the initial 9 from the participant label
+  mutate(
+    participant = str_sub(
+      participant.label,
+      start = 2
+    )
+  ) %>%
+
+  # Convert oTree session codes into session dates
+  mutate(
+    session.code = str_replace_all(
+      session.code,
+      c(
+        "qg6y3r9a" = "20230123am",
+        "2iop2giw" = "20230124am",
+        "okij97gz" = "20230125am",
+        "j1lv3s4e" = "20230126am",
+        "3in7onqq" = "20230127am",
+        "eczksh7i" = "20230127pm",
+        "tu4a0x6a" = "20230203pm",
+        "mmvdegpf" = "20230519am",
+        "kfe3j2be" = "20230519pm",
+        "9psjs3mm" = "20230522am",
+        "hd8ap5xv" = "20230602am",
+        "aa79cz46" = "20230602pm",
+        "x8xu57ds" = "20230609am",
+        "9kzoh9x9" = "20231004am",
+        "0e2ixliv" = "20231006am",
+        "5sfv44ze" = "20231006pm",
+        "cukcduqr" = "20231013am",
+        "c5rlwpru" = "20231013pm",
+        "15pwp56x" = "20240614am",
+        "ksndt4z8" = "20240617am",
+        "ph35usbx" = "20240617pm",
+        "qtcxtnhb" = "20240621am",
+        "ecx4o6ll" = "20240621pm",
+        "5txe5e7n" = "20240624am"
+      )
+    )
+  ) %>%
+
+  select(
+    participant,
+    participant.label,
+    participant.code,
+    oTree_id = participant.id_in_session,
+    session.code,
+    treatment = session.config.treatment,
+    total_payoff = participant.payoff,
+    risk_av,
+    time_pref,
+    crt_mean,
+
+    # Select only variables from rounds 1 to 20
+    matches(
+      "^kto\\.([1-9]|1[0-9]|20)\\."
+    )
+
+  ) %>%
+
+  # kto.1.player.xxx -> 1.player.xxx
+  rename_with(
+    ~ gsub(
+      "^kto\\.",
+      "",
+      .x
+    )
+  ) %>%
+
+  # 1.player.xxx -> 1__xxx
+  rename_with(
+    ~ gsub(
+      "\\.player\\.",
+      "__",
+      .x
+    )
+  ) %>%
+
+  # 1.group.xxx -> 1__xxx
+  rename_with(
+    ~ gsub(
+      "\\.group\\.",
+      "__",
+      .x
+    )
+  ) %>%
+
+  # 1.subsession.xxx -> 1__xxx
+  rename_with(
+    ~ gsub(
+      "\\.subsession\\.",
+      "__",
+      .x
+    )
+  ) %>%
+
+  pivot_longer(
+
+    cols = -c(
+      treatment,
+      participant,
+      oTree_id,
+      session.code,
+      total_payoff,
+      risk_av,
+      time_pref,
+      crt_mean,
+      participant.label,
+      participant.code
+    ),
+
+    names_to = c(
+      "order",
+      ".value"
+    ),
+
+    names_sep = "__"
+
+  ) %>%
+
+  # Keep only actual experimental rounds
+  filter(
+    order %in% as.character(1:20)
+  ) %>%
+
+  mutate(
+
+    is_buyout = case_when(
+      is_buyout == "0" ~ NA_character_,
+      is_buyout == "1" ~ "0",
+      is_buyout == "999" ~ "1",
+      TRUE ~ as.character(is_buyout)
+    )
+
+  ) %>%
+
+  mutate(
+
+    payment_price =
+      as.numeric(payment_price) *
+      as.numeric(is_winning_bidder),
+
+    payment_price =
+      na_if(
+        payment_price,
+        0
+      )
+
+  ) %>%
+
+  mutate(
+
+    order = as.integer(order),
+
+    is_buyout = as.integer(is_buyout),
+
+    num_of_group = as.numeric(num_of_group),
+
+    total_payoff = as.numeric(total_payoff)
+
+  ) %>%
+
+  mutate(
+
+    is_group4 = ifelse(
+      num_of_group == 4,
+      1,
+      0
+    )
+
+  ) %>%
+
+  mutate(
+
+    final_payoff = ifelse(
+      total_payoff < 0,
+      1000,
+      total_payoff + 1000
+    )
+
+  ) %>%
+
+  select(
+
+    treatment,
+
+    session_delta = delta,
+
+    session = session.code,
+
+    participant,
+
+    case = treatment_id,
+
+    group = id_in_subsession,
+
+    is_group4,
+
+    delta = time_discount_rate,
+
+    pv = private_value,
+
+    discounted_pv = discounted_private_value,
+
+    is_buyout,
+
+    bid_amount,
+
+    payment = payment_price,
+
+    win_buyout = is_winning_buyer,
+
+    win_bid = is_winning_bidder,
+
+    payoff,
+
+    total_payoff,
+
+    final_payoff,
+
+    order,
+
+    risk_av,
+
+    time_pref,
+
+    crt_mean,
+
+    participant.code
+
+  ) %>%
+
+  arrange(
+    session,
+    participant,
+    order
+  ) %>%
+
+  as_tibble()
+
+
+# Safety checks:
+# order must contain only rounds 1 to 20
+stopifnot(
+  !any(is.na(tidy_data$order))
+)
+
+stopifnot(
+  all(
+    tidy_data$order %in% 1:20
+  )
+)
+
+```
+
+### Sample Restrictions {-}
+
+Bot participants, participants who dropped out during the experiment, and 10 observations with connection failures due to poor network conditions are excluded from the analysis.
+
+```{r sample-restrictions}
+
+tidy_data <- tidy_data %>%
+
+  # Bot participants
+  filter(
+    !participant %in% c(
+      "7777",
+      "8888",
+      "9999"
+    )
+  ) %>%
+
+  # Participants who dropped out during the experiment
+  filter(
+    !(
+      session == "20230519pm" &
+        participant == "17"
+    )
+  ) %>%
+
+  filter(
+    !(
+      session == "20231013pm" &
+        participant == "07"
+    )
+  ) %>%
+
+  filter(!is.na(is_buyout)) 
+#connection failures due to poor network conditions
+
+```
+
+### Save Analysis Data {-}
+
+The cleaned participant-round level dataset is saved in `data/`.
+
+```{r save-analysis-data}
+
+write_csv(
+  tidy_data,
+  "data/tidy_data.csv"
+)
+
+```
+
+# 3.3 Experimental Results {-}
+
+##### P11 {-}
+
+- Number of observations  
+
+```{r}
+nrow(tidy_data)
+```
+
+- Number of participants  
+
+```{r}
+tidy_data %>%
+
+  distinct(
+    session,
+    participant
+  ) %>%
+
+  nrow()
+```
+
+- Mean Experimental Payment  
+
+```{r mean-payment}
+
+tidy_data %>%
+
+  summarise(
+    mean_final_payoff = mean(
+      final_payoff,
+      na.rm = TRUE
+    )
+  )
+
+```
+
+- Analysis Sample
+
+```{r}
+datatable(
+  tidy_data,
+  extensions = "Scroller",
+  options = list(
+    deferRender = TRUE,
+    scrollY = 200,
+    scrollX = TRUE,
+    scroller = TRUE
+  )
+)
+
+```
+
+# A. Buyout Decision {-}
+
+##### PP11-12 {-}
+
+- **Table 3.** Buyout rates across 𝑵 and 𝜹  
+```{r}
+tidy_data %>%
+  filter(treatment %in% c(1, 2)) %>%
+  group_by(delta, is_group4) %>%
+  summarise(
+    "Buyout Rate" = mean(is_buyout, na.rm = TRUE),
+    "SD" = sd(is_buyout, na.rm = TRUE)
+  )
+``` 
+
+- Pearson chi-squared tests tests for buyout  
+
+```{r}
+
+# Create readable labels for group size, delta, and buyout
+chi_data <- tidy_data %>%
+  mutate(
+    N = ifelse(is_group4 == 1, "N=4", "N=2"),
+    delta_label = paste0("delta=", delta),
+    buyout_label = ifelse(is_buyout == 1, "Buyout", "No buyout")
+  )
+
+# 1. Chi-squared test: Buyout × N
+tab_N <- table(
+  Buyout = chi_data$buyout_label,
+  N = chi_data$N
+)
+
+chisq.test(tab_N)
+
+
+# 2. Chi-squared test: Buyout × delta
+tab_delta <- table(
+  Buyout = chi_data$buyout_label,
+  Delta = chi_data$delta_label
+)
+
+chisq.test(tab_delta)
+```
+
+---  
+
+##### P13 {-}
+
+- **Figure 1.** Buyout acceptance rates by net valuation under the rational and Level-k models
+
+```{r}
+tidy_data <- tidy_data %>%
+  
+  # ============================================================
+  # Experimental condition variables
+  # ============================================================
+  mutate(
+    is_session02 = ifelse(session_delta == 0.2, 1, 0),
+    
+    round_delta06 = ifelse(delta == 0.6, 1, 0),
+    round_delta02 = ifelse(delta == 0.2, 1, 0),
+    
+    ambig_delta = ifelse(treatment %in% c(3, 4), 1, 0),
+    ambig_N = ifelse(treatment %in% c(5, 6), 1, 0),
+    
+    know_N2 = ifelse(
+      is_group4 == 0 & treatment %in% 1:4,
+      1, 0
+    ),
+    
+    know_N4 = ifelse(
+      is_group4 == 1 & treatment %in% 1:4,
+      1, 0
+    ),
+    
+    know_delta1 = ifelse(
+      delta == 1 & treatment %in% c(1, 2, 5, 6),
+      1, 0
+    ),
+    
+    know_delta_decrease = ifelse(
+      delta != 1 & treatment %in% c(1, 2, 5, 6),
+      1, 0
+    )
+  ) %>%
+  
+  # ============================================================
+  # Thresholds
+  # ============================================================
+  mutate(
+    
+    # Random L1
+    th_random = case_when(
+      treatment == 1 & is_group4 == 1 & delta == 1   ~ 770,
+      treatment == 1 & is_group4 == 1 & delta == 0.6 ~ 760,
+      treatment == 1 & is_group4 == 0 & delta == 1   ~ 1000,
+      treatment == 1 & is_group4 == 0 & delta == 0.6 ~ 910,
+      
+      treatment == 2 & is_group4 == 1 & delta == 1   ~ 770,
+      treatment == 2 & is_group4 == 1 & delta == 0.2 ~ 750,
+      treatment == 2 & is_group4 == 0 & delta == 1   ~ 1000,
+      treatment == 2 & is_group4 == 0 & delta == 0.2 ~ 790,
+      
+      treatment == 3 & is_group4 == 1 ~ 760,
+      treatment == 3 & is_group4 == 0 ~ 910,
+      
+      treatment == 4 & is_group4 == 1 ~ 750,
+      treatment == 4 & is_group4 == 0 ~ 790,
+      
+      treatment == 5 & delta == 1   ~ 770,
+      treatment == 5 & delta == 0.6 ~ 760,
+      
+      treatment == 6 & delta == 1   ~ 770,
+      treatment == 6 & delta == 0.2 ~ 750,
+      
+      TRUE ~ 0
+    ),
+    
+    # Random L2
+    th_random_L2 = case_when(
+      treatment == 1 & is_group4 == 1 & delta == 1   ~ 1000,
+      treatment == 1 & is_group4 == 1 & delta == 0.6 ~ 850,
+      treatment == 1 & is_group4 == 0 & delta == 1   ~ 1000,
+      treatment == 1 & is_group4 == 0 & delta == 0.6 ~ 1000,
+      
+      treatment == 2 & is_group4 == 1 & delta == 1   ~ 1000,
+      treatment == 2 & is_group4 == 1 & delta == 0.2 ~ 770,
+      treatment == 2 & is_group4 == 0 & delta == 1   ~ 1000,
+      treatment == 2 & is_group4 == 0 & delta == 0.2 ~ 820,
+      
+      treatment == 3 & is_group4 == 1 ~ 850,
+      treatment == 3 & is_group4 == 0 ~ 1000,
+      
+      treatment == 4 & is_group4 == 1 ~ 770,
+      treatment == 4 & is_group4 == 0 ~ 820,
+      
+      treatment == 5 & delta == 1   ~ 1000,
+      treatment == 5 & delta == 0.6 ~ 850,
+      
+      treatment == 6 & delta == 1   ~ 1000,
+      treatment == 6 & delta == 0.2 ~ 770,
+      
+      TRUE ~ 0
+    ),
+    
+    # Rational
+    th_rational = case_when(
+      treatment == 1 & is_group4 == 1 & delta == 1   ~ 980,
+      treatment == 1 & is_group4 == 1 & delta == 0.6 ~ 840,
+      treatment == 1 & is_group4 == 0 & delta == 1   ~ 1000,
+      treatment == 1 & is_group4 == 0 & delta == 0.6 ~ 1000,
+      
+      treatment == 2 & is_group4 == 1 & delta == 1   ~ 980,
+      treatment == 2 & is_group4 == 1 & delta == 0.2 ~ 770,
+      treatment == 2 & is_group4 == 0 & delta == 1   ~ 1000,
+      treatment == 2 & is_group4 == 0 & delta == 0.2 ~ 820,
+      
+      treatment == 3 & is_group4 == 1 ~ 840,
+      treatment == 3 & is_group4 == 0 ~ 1000,
+      
+      treatment == 4 & is_group4 == 1 ~ 770,
+      treatment == 4 & is_group4 == 0 ~ 820,
+      
+      treatment == 5 & delta == 1   ~ 980,
+      treatment == 5 & delta == 0.6 ~ 840,
+      
+      treatment == 6 & delta == 1   ~ 980,
+      treatment == 6 & delta == 0.2 ~ 770,
+      
+      TRUE ~ 0
+    )
+  ) %>%
+  
+  # ============================================================
+  # Variables for theoretical predictions
+  # ============================================================
+  mutate(
+    prob_l0_random = 1 / 2,
+    
+    pv_th_random = pv - th_random,
+    pv_th_rational = pv - th_rational,
+    
+    # Random L1
+    is_not_consistent_notbo_random = case_when(
+      pv < th_random & is_buyout == 0 ~ 0,
+      pv < th_random & is_buyout == 1 ~ 1,
+      TRUE ~ NA_real_
+    ),
+    
+    is_not_consistent_random = case_when(
+      pv >= th_random & is_buyout == 0 ~ 1,
+      pv < th_random & is_buyout == 1 ~ 1,
+      TRUE ~ 0
+    ),
+    
+    # Rational
+    is_not_consistent_notbo_rational = case_when(
+      pv < th_rational & is_buyout == 0 ~ 0,
+      pv < th_rational & is_buyout == 1 ~ 1,
+      TRUE ~ NA_real_
+    ),
+    
+    is_not_consistent_rational = case_when(
+      pv >= th_rational & is_buyout == 0 ~ 1,
+      pv < th_rational & is_buyout == 1 ~ 1,
+      TRUE ~ 0
+    )
+  )
+
+bo_pv <- function(x, z, g = NULL, col = 2) {
+  
+  # Group data
+  if (!is.null(g)) {
+    grouping_vars <- rlang::syms(g)
+    x <- x %>%
+      dplyr::group_by(!!!grouping_vars, {{ z }})
+  } else {
+    x <- x %>%
+      dplyr::group_by({{ z }})
+  }
+  
+  # Summarize data
+  data_summary <- x %>%
+    dplyr::summarize(
+      total_buyout = sum(is_buyout, na.rm = TRUE),
+      count = n(),
+      mean_buyout = total_buyout / count,
+      .groups = "drop"
+    )
+  
+  # Create plot
+  p <- ggplot(data_summary, aes(x = {{ z }}, y = mean_buyout)) +
+    geom_bar(stat = "identity", width = 10) +
+    xlab(as.character(substitute(z))) +
+    ylab("Buyout Rate") +
+    theme_minimal()
+  
+  # Add facets if grouping variables are specified
+  if (!is.null(g)) {
+    facet_formula <- as.formula(
+      paste("~", paste(g, collapse = "+"))
+    )
+    
+    if (is.null(col)) {
+      p <- p + facet_wrap(facet_formula)
+    } else {
+      p <- p + facet_wrap(facet_formula, ncol = col)
+    }
+  }
+  
+  return(p)
+}
+```
+
+- Left Pane  
+
+```{r}
+tidy_data %>%
+  bo_pv(z = pv_th_rational)
+```
+
+- Right Pane  
+```{r}
+tidy_data %>%
+  bo_pv(z = pv_th_random)
+```
+
+
+```{r}
+tidy_data <- 
+  tidy_data %>%
+  mutate(
+         is_session06 = ifelse(session_delta == 0.6,1,0),
+         is_session02 = ifelse(session_delta == 0.2,1,0),
+         round_delta06 = ifelse(delta == 0.6,1,0),
+         round_delta02 = ifelse(delta == 0.2,1,0),
+         ambig_delta = ifelse(treatment %in% c(3,4),1,0),
+         ambig_N = ifelse(treatment %in% c(5,6),1,0),
+         pv740 = ifelse(pv >= 740,1,0),
+         know_N2 = ifelse(is_group4 == 0 & treatment %in% c(1:4), 1, 0),
+         know_N4 = ifelse(is_group4 == 1 & treatment %in% c(1:4), 1, 0),
+         know_delta1 = ifelse(delta == 1 & treatment %in% c(1,2,5,6), 1, 0),
+         know_delta_decrease = ifelse(delta != 1 & treatment %in% c(1,2,5,6), 1, 0),
+         condition_treatment = case_when(
+             treatment == 1 ~ "T1",
+             treatment == 2 ~ "T2",
+             treatment == 3 ~ "T3",
+             treatment == 4 ~ "T4",
+             treatment == 5 ~ "T5",
+             treatment == 6 ~ "T6",
+           ),
+          condition_detail = case_when(
+             treatment == 1 & is_group4 == 1 & delta == 1   ~ "T1_N4_D1",
+             treatment == 1 & is_group4 == 1 & delta == 0.6 ~ "T1_N4_D06",
+             treatment == 1 & is_group4 == 0 & delta == 1   ~ "T1_N2_D1",
+             treatment == 1 & is_group4 == 0 & delta == 0.6 ~ "T1_N2_D06",
+             treatment == 2 & is_group4 == 1 & delta == 1   ~ "T2_N4_D1",
+             treatment == 2 & is_group4 == 1 & delta == 0.2 ~ "T2_N4_D02",
+             treatment == 2 & is_group4 == 0 & delta == 1   ~ "T2_N2_D1",
+             treatment == 2 & is_group4 == 0 & delta == 0.2 ~ "T2_N2_D02",
+             treatment == 3 & is_group4 == 1  ~ "T3_N4",
+             treatment == 3 & is_group4 == 0  ~ "T3_N2",
+             treatment == 4 & is_group4 == 1  ~ "T4_N4",
+             treatment == 4 & is_group4 == 0  ~ "T4_N2",
+             treatment == 5 & delta == 1  ~ "T5_D1",
+             treatment == 5 & delta == 0.6  ~ "T5_D06",
+             treatment == 6 & delta == 1  ~ "T6_D1",
+             treatment == 6 & delta == 0.2  ~ "T6_D02", 
+             TRUE~ NA_character_ 
+             ),
+         th_random = 
+           case_when(
+             treatment == 1 & is_group4 == 1 & delta == 1   ~ 770,
+             treatment == 1 & is_group4 == 1 & delta == 0.6 ~ 760,
+             treatment == 1 & is_group4 == 0 & delta == 1   ~ 1000,
+             treatment == 1 & is_group4 == 0 & delta == 0.6 ~ 910,
+             treatment == 2 & is_group4 == 1 & delta == 1   ~ 770,
+             treatment == 2 & is_group4 == 1 & delta == 0.2 ~ 750,
+             treatment == 2 & is_group4 == 0 & delta == 1   ~ 1000,
+             treatment == 2 & is_group4 == 0 & delta == 0.2 ~ 790,
+             treatment == 3 & is_group4 == 1  ~ 760,
+             treatment == 3 & is_group4 == 0  ~ 910,
+             treatment == 4 & is_group4 == 1  ~ 750,
+             treatment == 4 & is_group4 == 0  ~ 790,
+             treatment == 5 & delta == 1  ~ 770,
+             treatment == 5 & delta == 0.6  ~ 760,
+             treatment == 6 & delta == 1  ~ 770,
+             treatment == 6 & delta == 0.2  ~ 750, 
+             TRUE~ 0
+             ),
+         th_random_L2 = 
+           case_when(
+             treatment == 1 & is_group4 == 1 & delta == 1   ~ 1000,
+             treatment == 1 & is_group4 == 1 & delta == 0.6 ~ 850,
+             treatment == 1 & is_group4 == 0 & delta == 1   ~ 1000,
+             treatment == 1 & is_group4 == 0 & delta == 0.6 ~ 1000,
+             treatment == 2 & is_group4 == 1 & delta == 1   ~ 1000,
+             treatment == 2 & is_group4 == 1 & delta == 0.2 ~ 770,
+             treatment == 2 & is_group4 == 0 & delta == 1   ~ 1000,
+             treatment == 2 & is_group4 == 0 & delta == 0.2 ~ 820,
+             treatment == 3 & is_group4 == 1  ~ 850,
+             treatment == 3 & is_group4 == 0  ~ 1000,
+             treatment == 4 & is_group4 == 1  ~ 770,
+             treatment == 4 & is_group4 == 0  ~ 820,
+             treatment == 5 & delta == 1  ~ 1000,
+             treatment == 5 & delta == 0.6  ~ 850,
+             treatment == 6 & delta == 1  ~ 1000,
+             treatment == 6 & delta == 0.2  ~ 770, 
+             TRUE~ 0
+             ),
+         th_truthful = 
+           case_when(
+             treatment == 1 & is_group4 == 1 & delta == 1   ~ 1000,
+             treatment == 1 & is_group4 == 1 & delta == 0.6 ~ 844.5,
+             treatment == 1 & is_group4 == 0 & delta == 1   ~ 1000,
+             treatment == 1 & is_group4 == 0 & delta == 0.6 ~ 1000,
+             treatment == 2 & is_group4 == 1 & delta == 1   ~ 1000,
+             treatment == 2 & is_group4 == 1 & delta == 0.2 ~ 765.3,
+             treatment == 2 & is_group4 == 0 & delta == 1   ~ 1000,
+             treatment == 2 & is_group4 == 0 & delta == 0.2 ~ 815.8,
+             treatment == 3 & is_group4 == 1  ~ 844.5,
+             treatment == 3 & is_group4 == 0  ~ 1000,
+             treatment == 4 & is_group4 == 1  ~ 765.3,
+             treatment == 4 & is_group4 == 0  ~ 815.8,
+             treatment == 5 & delta == 1  ~ 1000,
+             treatment == 5 & delta == 0.6  ~ 844.5,
+             treatment == 6 & delta == 1  ~ 1000,
+             treatment == 6 & delta == 0.2  ~ 765.3, 
+             TRUE~ 0
+             ),
+         th_rational = 
+           case_when(
+             treatment == 1 & is_group4 == 1 & delta == 1   ~ 980,
+             treatment == 1 & is_group4 == 1 & delta == 0.6 ~ 840,
+             treatment == 1 & is_group4 == 0 & delta == 1   ~ 1000,
+             treatment == 1 & is_group4 == 0 & delta == 0.6 ~ 1000,
+             treatment == 2 & is_group4 == 1 & delta == 1   ~ 980,
+             treatment == 2 & is_group4 == 1 & delta == 0.2 ~ 770,
+             treatment == 2 & is_group4 == 0 & delta == 1   ~ 1000,
+             treatment == 2 & is_group4 == 0 & delta == 0.2 ~ 820,
+             treatment == 3 & is_group4 == 1  ~ 840,
+             treatment == 3 & is_group4 == 0  ~ 1000,
+             treatment == 4 & is_group4 == 1  ~ 770,
+             treatment == 4 & is_group4 == 0  ~ 820,  
+             treatment == 5 & delta == 1  ~ 980,
+             treatment == 5 & delta == 0.6  ~ 840,
+             treatment == 6 & delta == 1  ~ 980,
+             treatment == 6 & delta == 0.2  ~ 770, 
+             TRUE~ 0
+             ),
+      prob_l0_random = 1/2,
+      prob_l0_truthful = pv/1000,
+      pv_th_truthful = pv - th_truthful,
+      # is_pv_th_truthful_positive = ifelse(pv_th_truthful >= 0, 1, 0),
+      # is_pv_th_random_positive = ifelse(pv_th_random >= 0, 1, 0),
+      # is_pv_th_rational_positive = ifelse(pv_th_rational >= 0, 1, 0),
+      pv_th_random = pv - th_random,
+      pv_th_random_L2 = pv - th_random_L2,
+      pv_th_rational = pv - th_rational,
+      
+      is_consistent_bo_random = ifelse(pv >= th_random & is_buyout == 1, 1, 
+                              ifelse(pv >= th_random & is_buyout == 0, 0, NA)),
+     
+      is_consistent_notbo_random = ifelse(pv < th_random & is_buyout == 0, 1, 
+                                 ifelse(pv < th_random & is_buyout == 1, 0, NA)),
+      
+      is_consistent_random = ifelse(is_consistent_bo_random == 1 | is_consistent_notbo_random == 1, 1, 0) %>%
+        replace(is.na(.), 0),
+      is_consistent_bo_random_L2 = ifelse(pv >= th_random_L2 & is_buyout == 1, 1, 
+                              ifelse(pv >= th_random_L2 & is_buyout == 0, 0, NA)),
+     
+      is_consistent_notbo_random_L2 = ifelse(pv < th_random_L2 & is_buyout == 0, 1, 
+                                 ifelse(pv < th_random_L2 & is_buyout == 1, 0, NA)),
+      
+      is_consistent_random_L2 = ifelse(is_consistent_bo_random_L2 == 1 | is_consistent_notbo_random_L2 == 1, 1, 0) %>%
+        replace(is.na(.), 0),
+     
+      is_consistent_bo_truthful = ifelse(pv >= th_truthful & is_buyout == 1, 1, 
+                                ifelse(pv >= th_truthful & is_buyout == 0, 0, NA)),
+     
+      is_consistent_notbo_truthful = ifelse(pv < th_truthful & is_buyout == 0, 1, 
+                                   ifelse(pv < th_truthful & is_buyout == 1, 0, NA)),
+      
+      is_consistent_truthful = ifelse(is_consistent_bo_truthful == 1 | is_consistent_notbo_truthful == 1, 1, 0) %>%
+        replace(is.na(.), 0),
+     
+      is_consistent_bo_rational= ifelse(pv >= th_rational& is_buyout == 1, 1, 
+                               ifelse(pv >= th_rational& is_buyout == 0, 0, NA)),
+     
+      is_consistent_notbo_rational= ifelse(pv < th_rational& is_buyout == 0, 1, 
+                                  ifelse(pv < th_rational& is_buyout == 1, 0, NA)),
+      
+      is_consistent_rational = ifelse(is_consistent_bo_rational == 1 | is_consistent_notbo_rational == 1, 1, 0) %>%
+        replace(is.na(.), 0),
+
+     ) %>%
+  mutate(
+      is_not_consistent_bo_random = ifelse(pv >= th_random & is_buyout == 1, 0, 
+                              ifelse(pv >= th_random & is_buyout == 0, 1, NA)),
+     
+      is_not_consistent_notbo_random = ifelse(pv < th_random & is_buyout == 0, 0, 
+                                 ifelse(pv < th_random & is_buyout == 1, 1, NA)),
+      
+      is_not_consistent_random = ifelse(is_not_consistent_bo_random == 1 | is_not_consistent_notbo_random == 1, 1, 0) %>%
+        replace(is.na(.), 0),
+      is_not_consistent_bo_random_L2 = ifelse(pv >= th_random_L2 & is_buyout == 1, 0, 
+                              ifelse(pv >= th_random_L2 & is_buyout == 0, 1, NA)),
+     
+      is_not_consistent_notbo_random_L2 = ifelse(pv < th_random_L2 & is_buyout == 0, 0, 
+                                 ifelse(pv < th_random_L2 & is_buyout == 1, 1, NA)),
+      
+      is_not_consistent_random_L2 = ifelse(is_not_consistent_bo_random_L2 == 1 | is_not_consistent_notbo_random_L2 == 1, 1, 0) %>%
+        replace(is.na(.), 0),
+     
+      is_not_consistent_bo_rational= ifelse(pv >= th_rational& is_buyout == 1, 0, 
+                               ifelse(pv >= th_rational& is_buyout == 0, 1, NA)),
+     
+      is_not_consistent_notbo_rational= ifelse(pv < th_rational& is_buyout == 0, 0, 
+                                  ifelse(pv < th_rational& is_buyout == 1, 1, NA)),
+      
+      is_not_consistent_rational = ifelse(is_not_consistent_bo_rational == 1 | is_not_consistent_notbo_rational == 1, 1, 0) %>%
+        replace(is.na(.), 0),
+    
+  ) %>% mutate(count_win_bid = sapply(order, function(o) sum(win_bid[order < o])),
+               count_win_bo = sapply(order, function(o) sum(win_buyout[order < o])))
+```
+
+- P13
+
+- Under the rational model
+
+```{r}
+
+tidy_data %>%
+  summarise("Over-Acceptance Rate" = mean(is_not_consistent_notbo_rational, na.rm = TRUE),
+            "SD" = sd(is_not_consistent_notbo_rational, na.rm = TRUE)
+            )
+
+
+
+
+tidy_data %>%
+  summarise("Suboptimal Buyout Rate" = mean(is_not_consistent_rational, na.rm = TRUE),
+            "SD" = sd(is_not_consistent_rational, na.rm = TRUE)
+            )
+
+
+
+
+``` 
+
+- Under the Random L1 model
+
+```{r}
+tidy_data %>%
+  summarise("Over-Acceptance Rate" = mean(is_not_consistent_notbo_random, na.rm = TRUE),
+            "SD" = sd(is_not_consistent_notbo_random, na.rm = TRUE)
+            )
+
+
+
+tidy_data %>%
+  summarise("Suboptimal Buyout Rate" = mean(is_not_consistent_random, na.rm = TRUE),
+            "SD" = sd(is_not_consistent_random, na.rm = TRUE)
+            )
+
+
+
+
+``` 
+
+---  
+
+##### PP13-14 {-}  
+
+- **Table 4** Buyout rates by ambiguity in 𝑵 and 𝜹
+
+- Left Pane: Buyout Rate by Uncertainty about N
+
+```{r}
+tidy_data %>%
+  group_by(ambig_N) %>%
+  summarise(
+    "Buyout Rate" = mean(is_buyout, na.rm = TRUE),
+    "SD" = sd(is_buyout, na.rm = TRUE)
+  )
+``` 
+
+```{r}
+cross_table <- table(
+  tidy_data$is_buyout,
+  tidy_data$ambig_N
+)
+
+chi_squared_test <- chisq.test(cross_table)
+
+print(chi_squared_test)
+```
+
+
+- Right Pane: Buyout Rate by Uncertainty about δ
+
+```{r}
+tidy_data %>%
+  group_by(ambig_delta) %>%
+  summarise(
+    "Buyout Rate" = mean(is_buyout, na.rm = TRUE),
+    "SD" = sd(is_buyout, na.rm = TRUE)
+  )
+```
+
+```{r}
+cross_table <- table(
+  tidy_data$is_buyout,
+  tidy_data$ambig_delta
+)
+
+
+chi_squared_test <- chisq.test(cross_table)
+
+print(chi_squared_test)
+```
+
+---  
+
+# B. Bidding Behavior {-}
+
+##### P15 {-}
+
+- **Figure 2** Relationship between bids and valuations
+
+```{r}
+plot_bid <- function(x, g = NULL) {
+  
+  # Group data if a grouping variable is specified
+  if (!is.null(g)) {
+    x <- x %>% group_by({{ g }})
+  }
+  
+  # Create scatter plot
+  p <- ggplot(x) +
+    geom_jitter(
+      aes(x = discounted_pv, y = bid_amount),
+      color = "#4472C4",
+      size = 1.4,
+      alpha = 0.3,
+      show.legend = FALSE
+    ) +
+    xlab("PV") +
+    ylab("Bid") +
+    theme_minimal() +
+    theme(legend.position = "none")
+  
+  # Add linear regression line with the intercept fixed at zero
+  p <- p +
+    geom_smooth(
+      aes(
+        x = discounted_pv,
+        y = bid_amount,
+        color = "#000000"
+      ),
+      method = "lm",
+      formula = y ~ x - 1,
+      size = 0.3
+    ) +
+    scale_color_manual(
+      values = c(
+        "1" = "#000000",
+        "0" = "#000000"
+      )
+    ) +
+    scale_linetype_manual(
+      values = c(
+        "1" = "solid",
+        "0" = "dashed"
+      )
+    )
+  
+  # Add facets if a grouping variable is specified
+  if (!is.null(g)) {
+    p <- p +
+      facet_wrap(
+        as.formula(
+          paste("~", g)
+        )
+      )
+  }
+  
+  return(p)
+}
+
+
+tidy_data %>%
+  plot_bid()
+```
+
+
+```{r}
+truth_or_not <- function(x){
+    x %>%
+    mutate( truth_bid = ifelse(bid_amount == discounted_pv, 1, 0),
+          over_bid = ifelse(bid_amount > discounted_pv, 1, 0),
+          under_bid = ifelse(bid_amount < discounted_pv, 1, 0),
+          bid_status = ifelse(truth_bid ==1, "truth_bid", 
+                              ifelse(over_bid ==1, "over_bid", "under_bid")))
+  }
+
+tidy_data <- truth_or_not(tidy_data)
+
+truth_or_not_table <- function(x) {
+  x %>%
+    summarise(
+      "N" = sum(!is.na(bid_amount)),
+      "Truthful (%)" = mean(truth_bid, na.rm = TRUE) * 100,
+      "Overbid (%)" = mean(over_bid, na.rm = TRUE) * 100,
+      "Underbid (%)" = mean(under_bid, na.rm = TRUE) * 100,
+      "SD" = sd(bid_amount - discounted_pv, na.rm = TRUE)
+    ) %>%
+    round(2)
+}
+
+
+tidy_data %>%
+  truth_or_not_table()
+```
+
+---  
+
+##### PP16-17 {-}
+
+- **Table 5** Regression results for bidding
+
+
+```{r}
+# =========================
+# Regression analysis of bids
+# =========================
+
+bid_reg <- function(x) {
+  
+  reg1 <- feols(
+    bid_amount ~ discounted_pv + order,
+    data = x
+  )
+  
+  reg2 <- update(
+    reg1,
+    . ~ . + round_delta06 + round_delta02 + is_group4
+  )
+  
+  reg3 <- update(
+    reg2,
+    . ~ . + time_pref + risk_av + crt_mean
+  )
+  
+  reg4 <- update(
+    reg3,
+    . ~ . + ambig_delta + ambig_N
+  )
+  
+  reg5 <- update(
+    reg4,
+    . ~ . + count_win_bid
+  )
+  
+  etable(
+    list(reg2, reg3, reg4, reg5),
+    se = "cluster",
+    cluster = "participant.code",
+    digits = 2,
+    digits.stats = 2,
+    depvar = FALSE
+  )
+}
+
+
+# Display regression table in HTML
+tidy_data %>%
+  bid_reg() %>%
+  datatable(
+    .,
+    extensions = "Scroller",
+    options = list(
+      pageLength = 100,
+      ordering = FALSE,
+      scrollX = TRUE,
+      dom = "t"
+    )
+  )
+```
+
+- The regression table is exported as a LaTeX file (`reg_bid.tex`) for use in the manuscript.
+
+```{r}
+reg1 <- feols(
+  bid_amount ~ discounted_pv + order,
+  data = tidy_data
+)
+
+reg2 <- update(
+  reg1,
+  . ~ . + round_delta06 + round_delta02 + is_group4
+)
+
+reg3 <- update(
+  reg2,
+  . ~ . + time_pref + risk_av + crt_mean
+)
+
+reg4 <- update(
+  reg3,
+  . ~ . + ambig_delta + ambig_N
+)
+
+reg5 <- update(
+  reg4,
+  . ~ . + count_win_bid
+)
+
+
+# Cluster-robust standard errors by participant
+se_reg2 <- se(
+  reg2,
+  cluster = ~ participant.code
+)
+
+se_reg3 <- se(
+  reg3,
+  cluster = ~ participant.code
+)
+
+se_reg4 <- se(
+  reg4,
+  cluster = ~ participant.code
+)
+
+se_reg5 <- se(
+  reg5,
+  cluster = ~ participant.code
+)
+
+
+# Cluster-robust p-values
+p_reg2 <- pvalue(
+  reg2,
+  cluster = ~ participant.code
+)
+
+p_reg3 <- pvalue(
+  reg3,
+  cluster = ~ participant.code
+)
+
+p_reg4 <- pvalue(
+  reg4,
+  cluster = ~ participant.code
+)
+
+p_reg5 <- pvalue(
+  reg5,
+  cluster = ~ participant.code
+)
+
+
+reg_tex <- texreg(
+  list(
+    reg2,
+    reg3,
+    reg4,
+    reg5
+  ),
+  override.se = list(
+    se_reg2,
+    se_reg3,
+    se_reg4,
+    se_reg5
+  ),
+  override.pvalues = list(
+    p_reg2,
+    p_reg3,
+    p_reg4,
+    p_reg5
+  ),
+  caption.above = TRUE,
+  caption = "Regression Results",
+  stars = c(0.01, 0.05, 0.1),
+  dcolumn = TRUE,
+  custom.model.names = c(
+    "Model 1",
+    "Model 2",
+    "Model 3",
+    "Model 4"
+  ),
+  booktabs = TRUE,
+  use.packages = FALSE
+)
+
+# Export the table to a LaTeX file
+cat(
+  reg_tex,
+  file = "reg_bid.tex"
+)
+```
+
+---
+
+# Appendix D {-}
+
+
+```{r}
+# =========================
+# Logit regression analysis of buyout decisions
+# =========================
+
+# Model 1
+reg_logit1 <- glm(
+  is_buyout ~
+    know_N2 +
+    know_N4 +
+    know_delta1 +
+    know_delta_decrease +
+    know_delta_decrease:is_session02 +
+    pv +
+    order,
+  data = tidy_data,
+  family = binomial
+)
+
+# Model 2: Add individual characteristics
+reg_logit2 <- update(
+  reg_logit1,
+  ~ . + risk_av + time_pref + crt_mean
+)
+
+# Model 3: Add previous buyout experience
+reg_logit3 <- update(
+  reg_logit2,
+  ~ . + count_win_bo
+)
+
+
+# =========================
+# Cluster-robust standard errors at the participant level
+# =========================
+
+vcov_logit1 <- sandwich::vcovCL(
+  reg_logit1,
+  cluster = ~ participant.code
+)
+
+vcov_logit2 <- sandwich::vcovCL(
+  reg_logit2,
+  cluster = ~ participant.code
+)
+
+vcov_logit3 <- sandwich::vcovCL(
+  reg_logit3,
+  cluster = ~ participant.code
+)
+
+
+se_logit1 <- sqrt(diag(vcov_logit1))
+se_logit2 <- sqrt(diag(vcov_logit2))
+se_logit3 <- sqrt(diag(vcov_logit3))
+
+
+z_logit1 <- coef(reg_logit1) / se_logit1
+z_logit2 <- coef(reg_logit2) / se_logit2
+z_logit3 <- coef(reg_logit3) / se_logit3
+
+
+p_logit1 <- 2 * pnorm(abs(z_logit1), lower.tail = FALSE)
+p_logit2 <- 2 * pnorm(abs(z_logit2), lower.tail = FALSE)
+p_logit3 <- 2 * pnorm(abs(z_logit3), lower.tail = FALSE)
+
+
+# =========================
+# Display regression table in HTML
+# =========================
+
+reg_logit_html <- htmlreg(
+  list(
+    reg_logit1,
+    reg_logit2,
+    reg_logit3
+  ),
+  override.se = list(
+    se_logit1,
+    se_logit2,
+    se_logit3
+  ),
+  override.pvalues = list(
+    p_logit1,
+    p_logit2,
+    p_logit3
+  ),
+  caption.above = TRUE,
+  caption = "Logit Regression Results",
+  stars = c(0.01, 0.05, 0.1),
+  custom.model.names = c(
+    "Model 1",
+    "Model 2",
+    "Model 3"
+  ),
+  custom.note = "Cluster-robust standard errors at the participant level in parentheses."
+)
+
+cat(
+  reg_logit_html,
+  file = "reg_logit.html"
+)
+
+includeHTML(
+  "reg_logit.html"
+)
+```
+
+- The regression table is also exported as a LaTeX file (`reg_logit.tex`) for use in the manuscript.
+
+```{r}
+reg_logit_tex <- texreg(
+  list(
+    reg_logit1,
+    reg_logit2,
+    reg_logit3
+  ),
+  override.se = list(
+    se_logit1,
+    se_logit2,
+    se_logit3
+  ),
+  override.pvalues = list(
+    p_logit1,
+    p_logit2,
+    p_logit3
+  ),
+  caption.above = TRUE,
+  caption = "Logit Regression Results",
+  stars = c(0.01, 0.05, 0.1),
+  dcolumn = TRUE,
+  custom.model.names = c(
+    "Model 1",
+    "Model 2",
+    "Model 3"
+  ),
+  custom.note = "Cluster-robust standard errors at the participant level in parentheses.",
+  booktabs = TRUE,
+  use.packages = FALSE
+)
+
+cat(
+  reg_logit_tex,
+  file = "reg_logit.tex"
+)
+```
+
+---
+
+# Appendix E {-}
+
+- For verification purposes, the estimation is run for 50 trials.
+- The best-fitting result from 1,000,000 trials is reported below.
+
+```{r}
+# =========================
+# Maximum likelihood estimation
+# =========================
+
+trial_num <- 50
+
+mls <- function(p, q, c, d) {
+  
+  # Choice probabilities for L1 and L2
+  para_l1 <- c * (pv - th_random)
+  prob_l1 <- 1 / (1 + exp(-para_l1))
+  
+  para_l2 <- d * (pv - th_random_L2)
+  prob_l2 <- 1 / (1 + exp(-para_l2))
+  
+  # Population shares of L1 and L2
+  rate_l1 <- 1 / (1 + exp(-p))
+  rate_l2 <- 1 / (1 + exp(-q))
+
+  # Mixture probability
+  prob <- (1 - rate_l1 - rate_l2) * prob_l0_random +
+    rate_l1 * prob_l1 +
+    rate_l2 * prob_l2
+  
+  # Log-likelihood
+  log_lik <- is_buyout * log(prob) +
+    (1 - is_buyout) * log(1 - prob)
+  
+  log_lik_sum <- sum(log_lik)
+
+  return(-log_lik_sum)
+}
+
+
+# List to store estimation results
+results <- list()
+
+
+# Repeat estimation with different random starting values
+for (i in 1:trial_num) {
+
+  # Generate random starting values
+  start_values <- list(
+    p = rnorm(1, 0, 50),
+    q = rnorm(1, 0, 50),
+    c = rnorm(1, 0, 50),
+    d = rnorm(1, 0, 50)
+  )
+
+  # Run maximum likelihood estimation while catching errors
+  res <- tryCatch({
+    mle2(
+      mls,
+      start = start_values,
+      data = tidy_data
+    )
+  }, error = function(e) {
+    return(NULL)
+  })
+
+  # Store results only if estimation succeeds
+  if (!is.null(res)) {
+    
+    log_lik_value <- logLik(res)
+    
+    results[[length(results) + 1]] <- list(
+      start_values = start_values,
+      res = res,
+      log_lik = log_lik_value
+    )
+  }
+}
+
+
+# Check whether any estimation attempt succeeded
+if (length(results) == 0) {
+  
+  print("Estimation failed in all trials.")
+  
+} else {
+  
+  # Select the trial with the highest log-likelihood
+  best_result <- results[[
+    which.max(
+      sapply(results, function(x) x$log_lik)
+    )
+  ]]
+  
+  print("Results from the trial with the highest log-likelihood:")
+  print(best_result$start_values)
+  print(summary(best_result$res))
+
+  # Report estimated population shares of L0, L1, and L2
+  print(
+    paste(
+      "L0 share:",
+      1 -
+        1 / (1 + exp(-coef(best_result$res)["p"])) -
+        1 / (1 + exp(-coef(best_result$res)["q"])),
+      
+      "L1 share:",
+      1 / (1 + exp(-coef(best_result$res)["p"])),
+      
+      "L2 share:",
+      1 / (1 + exp(-coef(best_result$res)["q"]))
+    )
+  )
+}
+```
+
+```{r}
+# =========================
+# Plot sigmoid functions for L1 and L2
+# =========================
+
+sigmoid_fig <- function(c, d) {
+  
+  # Set the range of x
+  x <- seq(
+    -500,
+    500,
+    length.out = 1000
+  )
+  
+  # Calculate sigmoid functions for L1 and L2
+  sigmoid_L1 <- 1 / (1 + exp(-(c * x)))
+  sigmoid_L2 <- 1 / (1 + exp(-(d * x)))
+  
+  # Create data frame for plotting
+  sigmoid_data <- data.frame(
+    x = x,
+    sigmoid_L1 = sigmoid_L1,
+    sigmoid_L2 = sigmoid_L2
+  )
+  
+  # Create the plot
+  p <- ggplot(
+    sigmoid_data,
+    aes(x = x)
+  ) +
+    geom_line(
+      aes(
+        y = sigmoid_L1,
+        color = "L1"
+      )
+    ) +
+    geom_line(
+      aes(
+        y = sigmoid_L2,
+        color = "L2"
+      )
+    ) +
+    labs(
+      x = "",
+      y = ""
+    ) +
+    theme_minimal()
+  
+  # Full-range plot
+  p1 <- p +
+    scale_x_continuous(
+      limits = c(-300, 300)
+    ) +
+    theme(
+      legend.position = "top",
+      legend.title = element_blank()
+    )
+  
+  # Zoomed-in plot
+  p2 <- p +
+    scale_x_continuous(
+      limits = c(-40, 40)
+    ) +
+    theme(
+      legend.position = "none"
+    )
+  
+  print(p1 / p2)
+  
+  cat(
+    "c:", c,
+    "d:", d,
+    "\n"
+  )
+}
+
+
+sigmoid_fig(
+  c = coef(best_result$res)["c"],
+  d = coef(best_result$res)["d"]
+)
+```
+
+- **Reference:** Plot Using the Best-Fitting Estimates
+
+Initial values  
+p: 0.6705527  
+q: -0.699498  
+c: 0.8350996  
+d: 0.8755123  
+
+Estimated values  
+p: 1.98919760  
+q: -2.31635326  
+c: 0.02546404  
+d: 0.00374196  
+
+-2 Log-Likelihood: 4176.629  
+
+L0 share: 0.0305641619087935  
+L1 share: 0.879658221137242  
+L2 share: 0.0897776169539644  
+
+```{r}
+# Plot using the best-fitting estimates obtained so far
+sigmoid_fig(
+  c = 0.02546404,
+  d = 0.00374196
+)
+```
+
+---
+
+# Appendix F {-}
+
+- **Figure F.1** Relationship between bids and valuations across N
+
+```{r}
+tidy_data %>%
+  plot_bid(g = "is_group4")
+```
+
+- **Figure F.2** Relationship between bids and valuations across δ
+
+```{r}
+tidy_data %>%
+  plot_bid(g = "delta")
+```
