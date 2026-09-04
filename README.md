@@ -32,13 +32,14 @@ Contains the instructions used in the experiment.
 
 ## How to Reproduce the Results
 
-1. Open `run_all.Rmd` in RStudio.
+1. Place the raw experimental data in `data/raw/` and the post-experimental questionnaire data in `data/questionnaire/`.
+2. Open `run_all.Rmd` in RStudio.
+3. Install the required R packages if needed.
+4. Run the entire file (Knit).
 
-2. Install the required R packages if needed.
+The script imports and cleans the raw data, merges the experimental and questionnaire data, and generates the analysis dataset `data/tidy_data.csv`.
 
-3. Run the entire file (Knit).
-
-The main tables and figures reported in the paper can be reproduced from this file.
+The main tables and figures reported in the paper can then be reproduced from this file.
 
 ---
 
