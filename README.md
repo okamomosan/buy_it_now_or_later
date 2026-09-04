@@ -4,7 +4,7 @@ This repository contains the replication materials for the paper:
 
 **"Buy It Now Or Later? An Experimental Study of Second-price Auction with Buy Price"**
 
-Toshihiro Tsuchihashi, Toshiji Kawagoe, and Tomohisa Okada
+Toshiji Kawagoe, Tomohisa Okada, and Toshihiro Tsuchihashi
 
 ---
 
