@@ -42,33 +42,6 @@ The main tables and figures reported in the paper can be reproduced from this fi
 
 ---
 
-## Experimental Design
-
-The experiment studies buyout decisions in second-price auctions with a buyout option.
-
-The experimental design varies:
-
-- the number of bidders,
-- the rate at which bidders' valuations decline over time,
-- and uncertainty regarding these factors.
-
-The experiment also collects measures related to participants' risk preferences, time preferences, and cognitive reasoning.
-
----
-
-## Key Experimental Variables
-
-- `N`: Number of bidders in the auction.
-- `delta`: Rate of decay in the bidder's valuation.
-- `private_value`: Bidder's private valuation.
-- `buyout`: Indicator for whether the bidder exercised the buyout option.
-- `bid`: Bid submitted in the second-price auction.
-- `CRT`: Measure of cognitive reflection.
-
-Additional variables and their definitions are documented in the analysis file.
-
----
-
 ## Notes
 
 - The experiment was conducted using incentivized decisions.
